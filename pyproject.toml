@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ripple"
+version = "3.0.8"
+description = "Download and install Proton releases with centralized storage and symlink management"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+authors = [
+  { name = "sachesi", email = "xsachesi@pm.me" }
+]
+keywords = ["proton", "steam", "lutris", "bottles", "gaming"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Games/Entertainment",
+  "Topic :: System :: Installation/Setup",
+]
+
+[project.scripts]
+ripple = "ripple.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/bash-completion/completions" = ["assets/usr/share/bash-completion/completions/ripple"]
+"share/zsh/site-functions" = ["assets/usr/share/zsh/site-functions/_ripple"]
+"share/fish/vendor_completions.d" = ["assets/usr/share/fish/vendor_completions.d/ripple.fish"]

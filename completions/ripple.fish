@@ -1,0 +1,8 @@
+complete -c ripple -l help -d 'Show help'
+complete -c ripple -l configure -d 'Re-run interactive configuration wizard'
+complete -c ripple -l remove-old -d 'Remove all old versions except latest and locked'
+complete -c ripple -l lock -r -d 'Lock a specific version (SLUG:TAG)'
+complete -c ripple -l unlock -r -d 'Unlock a specific version (SLUG:TAG)'
+complete -c ripple -l list -d 'List installed Proton versions'
+complete -c ripple -l list-remote -r -a 'ge-proton dw-proton cachyos-proton em-proton umu' -d 'List upstream releases for slug'
+complete -c ripple -l download -r -d 'Download and install a specific version (SLUG:TAG)'
