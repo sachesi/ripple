@@ -1,0 +1,15 @@
+#compdef ripple
+
+local -a opts
+opts=(
+  '--help[show help]'
+  '--configure[re-run interactive configuration wizard]'
+  '--remove-old[remove all old versions except latest and locked]'
+  '--lock[lock a specific version (SLUG:TAG)]:slug:tag'
+  '--unlock[unlock a previously locked version (SLUG:TAG)]:slug:tag'
+  '--list[list installed Proton versions]'
+  '--list-remote[list upstream releases for a slug]:slug:(ge-proton dw-proton cachyos-proton em-proton umu)'
+  '--download[download and install a specific version (SLUG:TAG)]:slug:tag'
+)
+
+_arguments -s $opts
