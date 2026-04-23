@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+dist/
+build/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.tox/
+
+# Nix
+result
+result-*
+
+# OS
+.DS_Store
+
+# Local env
+.env
+.envrc
+.direnv/
+.serena/
