@@ -1,9 +1,5 @@
-#!/usr/bin/env python3
-"""ripple — download and install the latest Proton releases."""
-
 from __future__ import annotations
 
-import argparse
 import concurrent.futures
 import json
 import os
@@ -12,276 +8,33 @@ import shutil
 import sys
 import tarfile
 import tempfile
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-TIMEOUT = 30
-MIN_FREE_SPACE_GB = 2
-HOME = Path.home()
-CONFIG_PATH = HOME / ".config" / "ripple" / "config.json"
-LOCK_FILENAME = ".locked"
-DEFAULT_CENTRAL_BASE = HOME / ".local/share/ripple/store"
-
-UMU_BIN_DIR = HOME / ".local" / "bin"
-UMU_BIN_PATH = UMU_BIN_DIR / "umu-run"
-UMU_STATE_DIR = HOME / ".local" / "share" / "ripple" / "umu"
-UMU_VERSION_FILE = UMU_STATE_DIR / ".latest-version"
-
-UMU_LATEST_RELEASE_API = "https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest"
-UMU_RELEASES_API = "https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases"
-
-SYMLINK_TARGET_DIRS: list[Path] = [
-    HOME / ".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d",
-    HOME / ".var/app/com.usebottles.bottles/data/bottles/runners",
-    HOME / ".var/app/net.lutris.Lutris/data/lutris/runners/wine",
-    HOME / ".local/share/Steam/compatibilitytools.d",
-    HOME / ".local/share/bottles/data/bottles/runners",
-    HOME / ".local/share/lutris/runners/wine",
-    HOME / ".local/share/leyen/proton",
-]
-
-SYMLINK_TARGET_LABELS: dict[Path, str] = {
-    HOME / ".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d": "Steam Flatpak",
-    HOME / ".var/app/com.usebottles.bottles/data/bottles/runners": "Bottles Flatpak",
-    HOME / ".var/app/net.lutris.Lutris/data/lutris/runners/wine": "Lutris Flatpak",
-    HOME / ".local/share/Steam/compatibilitytools.d": "Steam Native",
-    HOME / ".local/share/bottles/data/bottles/runners": "Bottles Native",
-    HOME / ".local/share/lutris/runners/wine": "Lutris Native",
-    HOME / ".local/share/leyen/proton": "Leyen",
-}
-
-LATEST_LINK_LABEL = "Store latest alias"
-
-ALL_SOURCES: list[tuple[str, str]] = [
-    ("ge-proton", "GE Proton      (GloriousEggroll/proton-ge-custom, GitHub)"),
-    ("dw-proton", "DW Proton      (dawn-winery/dwproton, dawn.wine)"),
-    (
-        "cachyos-proton",
-        "CachyOS Proton (CachyOS/proton-cachyos, GitHub) — auto-selects v2/v3/v4 build",
-    ),
-    ("em-proton", "EM Proton      (Etaash-mathamsetty/Proton, GitHub)"),
-]
-
-if sys.stdout.isatty():
-
-    def _c(code: str) -> str:
-        return f"\033[{code}m"
-
-    R, BOLD, DIM = _c("0"), _c("1"), _c("2")
-    BLUE, CYAN, GREEN, YELLOW, RED = _c("34"), _c("36"), _c("32"), _c("33"), _c("31")
-    C_TL = _c("36")
-    C_OK = f"{C_TL}│{R}  {_c('1;32')}✔{R}"
-    C_INFO = f"{C_TL}│{R}  {_c('1;34')}ℹ{R}"
-    C_WARN = f"{C_TL}│{R}  {_c('1;33')}⚠{R}"
-    C_ERR = f"{C_TL}│{R}  {_c('1;31')}✖{R}"
-    C_STEP = f"{C_TL}●{R}"
-else:
-    R = BOLD = DIM = ""
-    BLUE = CYAN = GREEN = YELLOW = RED = C_TL = ""
-    C_OK, C_INFO, C_WARN, C_ERR, C_STEP = "[OK]", "[INFO]", "[WARN]", "[ERR]", "[STEP]"
-
-
-class UIManager:
-    def __init__(self):
-        self.tty = sys.stdout.isatty()
-        self.inner_text: str | None = None
-        self.overall_text: str | None = None
-        self.lines_drawn = 0
-
-    def _clear_bars(self):
-        if not self.tty:
-            return
-        sys.stdout.write("\r\033[2K")
-        for _ in range(self.lines_drawn):
-            sys.stdout.write("\033[1A\r\033[2K")
-        self.lines_drawn = 0
-
-    def _draw_bars(self):
-        if not self.inner_text and not self.overall_text:
-            return
-        out = ""
-        lines = 0
-        if self.inner_text and self.overall_text:
-            out = f"{C_TL}│{R}  {self.overall_text}\n{C_TL}│{R}  {self.inner_text}"
-            lines = 1
-        elif self.inner_text:
-            out = f"{C_TL}│{R}  {self.inner_text}"
-        elif self.overall_text:
-            out = f"{C_TL}│{R}  {self.overall_text}"
-
-        sys.stdout.write(out + "\r")
-        sys.stdout.flush()
-        self.lines_drawn = lines
-
-    def print(self, msg="", file=sys.stdout):
-        if not self.tty:
-            print(msg, file=file, flush=True)
-            return
-        self._clear_bars()
-        if file == sys.stdout:
-            sys.stdout.write(str(msg) + "\n")
-        else:
-            sys.stdout.flush()
-            print(msg, file=file, flush=True)
-        self._draw_bars()
-
-    def set_inner(self, text: str):
-        if not self.tty:
-            return
-        self._clear_bars()
-        self.inner_text = text
-        self._draw_bars()
-
-    def close_inner(self, static_msg: str):
-        if not self.tty:
-            return
-        self._clear_bars()
-        self.inner_text = None
-        sys.stdout.write(f"{C_TL}│{R}  {static_msg}\n")
-        self._draw_bars()
-
-
-ui = UIManager()
-
-
-def info(msg: str) -> None:
-    ui.print(f"{C_INFO} {msg}")
-
-
-def ok(msg: str) -> None:
-    ui.print(f"{C_OK} {msg}")
-
-
-_first_step = True
-
-
-def step(msg: str, sub: str = "") -> None:
-    global _first_step
-    prefix = (
-        f"{C_TL}│{R}\n{C_TL}├─{R} {C_STEP} {BOLD}{msg}{R}"
-        if not _first_step
-        else f"{C_TL}╭─{R} {C_STEP} {BOLD}{msg}{R}"
-    )
-    _first_step = False
-    if sub:
-        prefix += f" {DIM}({sub}){R}"
-    ui.print(prefix)
-
-
-def warn(msg: str) -> None:
-    ui.print(f"{C_WARN} {msg}", file=sys.stderr)
-
-
-def err(msg: str) -> None:
-    ui.print(f"{C_ERR} {msg}", file=sys.stderr)
-
-
-def done_msg(msg: str) -> None:
-    ui.print(f"{C_TL}│{R}\n{C_TL}╰─{R} {GREEN}✔{R} {BOLD}{msg}{R}\n")
-
-
-class DownloadProgressBar:
-    BLOCKS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
-
-    def __init__(self, title: str) -> None:
-        self._title = title
-        self._tty = sys.stdout.isatty()
-        self._start_time = time.perf_counter()
-        if self._tty:
-            self.update(0, 0, 1)
-
-    def _format_time(self, seconds: float) -> str:
-        m, s = divmod(int(seconds), 60)
-        return f"{m:02d}:{s:02d}"
-
-    def update(self, downloaded: int, total: int, chunk_count: int = 0) -> None:
-        if not self._tty:
-            if chunk_count % 50 == 0 and total > 0:
-                pct = downloaded * 100 // total
-                ui.print(f"   Downloading {self._title}... {pct}%")
-            return
-
-        pct = downloaded / total if total > 0 else 0
-        pct_str = f"{int(pct * 100):3d}%"
-
-        elapsed = time.perf_counter() - self._start_time
-        if downloaded > 0 and total > downloaded:
-            eta = (elapsed / downloaded) * (total - downloaded)
-            time_str = f"[{self._format_time(elapsed)} < {self._format_time(eta)}]"
-        else:
-            time_str = f"[{self._format_time(elapsed)}]"
-
-        mib_done = downloaded / 1_048_576
-        mib_total = total / 1_048_576
-        size_str = f"{mib_done:.1f}/{mib_total:.1f} MiB"
-
-        term_cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-        title_pad = f"{self._title:<15}"
-        fixed_len = 2 + len(title_pad) + 2 + 2 + len(size_str) + 3 + len(pct_str) + 2 + len(time_str) + 1
-        max_bar_width = 30
-        available_width = term_cols - fixed_len - 2
-        bar_width = min(max_bar_width, max(10, available_width // 2))
-
-        fill_val = pct * bar_width
-        full_blocks = int(fill_val)
-        remainder = fill_val - full_blocks
-
-        if downloaded >= total and total > 0:
-            bar_chars = "█" * bar_width
-            bar_color = GREEN if self._tty else ""
-            empty_chars = ""
-        else:
-            bar_chars = "█" * full_blocks
-            if full_blocks < bar_width:
-                bar_chars += self.BLOCKS[int(remainder * len(self.BLOCKS))]
-                empty_chars = "░" * (bar_width - full_blocks - 1)
-            else:
-                empty_chars = ""
-            bar_color = CYAN if self._tty else ""
-
-        if empty_chars:
-            bar = f"{bar_color}{bar_chars}{DIM}{empty_chars}{R}"
-        else:
-            bar = f"{bar_color}{bar_chars}{R}"
-
-        text = f"{C_TL}│{R} {DIM}{title_pad}{R} [{bar}] {BOLD}{pct_str}{R} {DIM}•{R} {size_str} {DIM}•{R} {time_str}"
-        ui.set_inner(text)
-
-    def done(self) -> None:
-        if self._tty:
-            self.update(1, 1)
-            text = ui.inner_text or ""
-            ui.close_inner(text.replace(f"{DIM}{self._title:<15}{R}", f"{BOLD}{self._title:<15}{R}").replace(f"{C_TL}│{R} ", ""))
-        else:
-            ui.print(f"   Downloading {self._title}... 100% [OK]")
-
-
-_V2_FLAGS = {"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"}
-_V3_FLAGS = {"avx", "avx2", "bmi1", "bmi2", "fma", "movbe", "xsave"}
-_V4_FLAGS = {"avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"}
-
-
-def detect_cpu_level() -> int:
-    try:
-        cpuinfo = Path("/proc/cpuinfo").read_text()
-        flags: set[str] = set()
-        for line in cpuinfo.splitlines():
-            if line.startswith("flags"):
-                flags.update(line.split(":", 1)[1].split())
-        if _V4_FLAGS.issubset(flags):
-            return 4
-        if _V3_FLAGS.issubset(flags):
-            return 3
-        if _V2_FLAGS.issubset(flags):
-            return 2
-        return 1
-    except Exception:
-        return 1
+from .constants import (
+    ALL_SOURCES,
+    CONFIG_PATH,
+    DEFAULT_CENTRAL_BASE,
+    HOME,
+    LATEST_LINK_LABEL,
+    LOCK_FILENAME,
+    MIN_FREE_SPACE_GB,
+    SYMLINK_TARGET_LABELS,
+    TIMEOUT,
+    UMU_BIN_DIR,
+    UMU_BIN_PATH,
+    UMU_LATEST_RELEASE_API,
+    UMU_RELEASES_API,
+    UMU_STATE_DIR,
+    UMU_VERSION_FILE,
+    detect_cpu_level,
+)
+from .ui import BOLD, C_TL, CYAN, DIM, GREEN, R, YELLOW, DownloadProgressBar, err, info, ok, step, ui, warn
 
 
 @dataclass
@@ -369,10 +122,24 @@ class ReleaseInfo:
     asset_url: str
 
 
+@dataclass
+class SourceAPI:
+    url: str
+    pick_asset: Callable[[str], bool]
+    cpu_aware: bool = False
+
+
+def _require_https_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise RuntimeError(f"Refusing non-HTTPS URL: {url}")
+
+
 def fetch_json(url: str) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0"})
+    _require_https_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.2"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 403:
@@ -412,13 +179,14 @@ def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
         member_target = (dest / member.name).resolve()
         if not _is_within(resolved_dest, member_target):
             raise RuntimeError(f"Unsafe archive member path: {member.name}")
-    tf.extractall(path=dest)
+        tf.extract(member, path=dest)
 
 
 def download_file(url: str, dest: Path, label: str) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0"})
+    _require_https_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.2"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp, open(dest, "wb") as out:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp, open(dest, "wb") as out:  # nosec B310
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             pb = DownloadProgressBar(label)
@@ -543,13 +311,6 @@ FETCHERS: dict[str, Callable[[], ReleaseInfo]] = {
     "cachyos-proton": fetch_cachyos_proton,
     "em-proton": fetch_em_proton,
 }
-
-
-@dataclass
-class SourceAPI:
-    url: str
-    pick_asset: Callable[[str], bool]
-    cpu_aware: bool = False
 
 
 def _cachyos_asset_filter(url: str) -> bool:
@@ -871,7 +632,7 @@ def fetch_specific_release(slug: str, tag: str) -> ReleaseInfo:
     raise RuntimeError(f"Release tag '{tag}' not found for slug '{slug}'.")
 
 
-def _toggle_lock(central_base: Path, spec: str, *, lock: bool) -> None:
+def toggle_lock(central_base: Path, spec: str, *, lock: bool) -> None:
     step(f"{'Locking' if lock else 'Unlocking'} Version")
     if ":" not in spec:
         err(f"Expected SLUG:TAG format, got '{spec}'")
@@ -890,116 +651,3 @@ def _toggle_lock(central_base: Path, spec: str, *, lock: bool) -> None:
         ok(f"Unlocked: {DIM}{version_dir}{R}")
     else:
         info(f"Already unlocked: {DIM}{version_dir}{R}")
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ripple", description="Download and install the latest Proton releases.")
-    parser.add_argument("--configure", action="store_true", help="Re-run the interactive configuration wizard.")
-    parser.add_argument("--remove-old", action="store_true", help="Remove all old Proton versions from the central store, keeping only the latest and locked.")
-    parser.add_argument("--lock", metavar="SLUG:TAG", help="Lock a specific version. Format: ge-proton:GE-Proton10-20")
-    parser.add_argument("--unlock", metavar="SLUG:TAG", help="Unlock a previously locked version.")
-    parser.add_argument("--list", action="store_true", help="List all installed Proton versions in the central store.")
-    parser.add_argument("--list-remote", metavar="SLUG", help="List available upstream releases for a slug, e.g. ge-proton or umu")
-    parser.add_argument("--download", metavar="SLUG:TAG", help="Download and install a specific version, e.g. ge-proton:TAG or umu:TAG")
-    return parser
-
-
-def main() -> None:
-    args = build_parser().parse_args()
-
-    cfg = load_config()
-
-    if args.list_remote:
-        if args.list_remote == "umu":
-            list_remote_umu_releases()
-        else:
-            list_remote_releases(args.list_remote)
-        done_msg("Done.")
-        return
-
-    if cfg is None or args.configure:
-        cfg = run_wizard(existing=cfg)
-
-    existing_symlink_dirs = [d for d in SYMLINK_TARGET_DIRS if d.is_dir()]
-
-    if args.list:
-        list_installed(cfg)
-        list_managed_umu(cfg)
-        done_msg("Done.")
-        return
-
-    if args.lock:
-        _toggle_lock(cfg.central_base, args.lock, lock=True)
-        link_locked_versions(cfg.central_base, existing_symlink_dirs)
-        done_msg("Done.")
-        return
-    if args.unlock:
-        _toggle_lock(cfg.central_base, args.unlock, lock=False)
-        done_msg("Done.")
-        return
-
-    if args.remove_old:
-        remove_old_versions(cfg, existing_symlink_dirs)
-        done_msg("Done.")
-        return
-
-    if args.download:
-        if ":" not in args.download:
-            err(f"Expected SLUG:TAG format, got '{args.download}'")
-            sys.exit(1)
-        dl_slug, dl_tag = args.download.split(":", 1)
-        try:
-            if dl_slug == "umu":
-                install_umu_release(fetch_specific_umu_release(dl_tag))
-            else:
-                install_release(fetch_specific_release(dl_slug, dl_tag), cfg.central_base, existing_symlink_dirs, update_latest=False)
-                link_locked_versions(cfg.central_base, existing_symlink_dirs)
-        except Exception as exc:
-            err(str(exc))
-            sys.exit(1)
-        done_msg("Done.")
-        return
-
-    if not cfg.enabled_sources and not cfg.manage_umu:
-        warn(f"Nothing to do. Run {BOLD}ripple --configure{R} to enable Proton sources and/or umu.")
-        sys.exit(0)
-
-    results = fetch_releases_concurrently(cfg.enabled_sources) if cfg.enabled_sources else {}
-
-    for slug in cfg.enabled_sources:
-        step(f"Processing {BOLD}{slug}{R}")
-        rel = results.get(slug)
-        if isinstance(rel, Exception):
-            warn(f"Fetch failed: {rel}")
-            continue
-        if not rel:
-            warn("No release information found.")
-            continue
-        try:
-            install_release(rel, cfg.central_base, existing_symlink_dirs)
-        except Exception as e:
-            warn(f"Installation failed: {e}")
-
-    step("Locked Proton versions")
-    has_locked_versions, linked_any = link_locked_versions(cfg.central_base, existing_symlink_dirs)
-    if not has_locked_versions:
-        info("No locked versions configured.")
-    elif not linked_any:
-        ok("Already up to date.")
-
-    if cfg.manage_umu:
-        step(f"Processing {BOLD}umu{R}")
-        try:
-            install_umu_release(fetch_umu_release())
-        except Exception as e:
-            warn(f"UMU installation failed: {e}")
-
-    done_msg("All configured tools are up-to-date.")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.stdout.write("\r\033[2K")
-        sys.exit(130)
