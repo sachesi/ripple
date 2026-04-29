@@ -137,7 +137,7 @@ def _require_https_url(url: str) -> None:
 
 def fetch_json(url: str) -> Any:
     _require_https_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.2"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.3"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
             return json.loads(resp.read())
@@ -184,7 +184,7 @@ def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
 
 def download_file(url: str, dest: Path, label: str) -> None:
     _require_https_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.2"})
+    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.3"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp, open(dest, "wb") as out:  # nosec B310
             total = int(resp.headers.get("Content-Length", 0))
