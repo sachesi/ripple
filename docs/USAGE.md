@@ -18,5 +18,4 @@ The tool symlinks tools into:
 
 ### Aliases
 The tool maintains symlink aliases in the destination directories:
-- `latest`: points to the absolute latest version installed.
 - `<slug>-latest`: points to the latest version for that specific source.

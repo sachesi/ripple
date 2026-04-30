@@ -15,7 +15,7 @@
       {
         packages.ripple = python.pkgs.buildPythonApplication {
           pname = "ripple";
-          version = "3.0.4";
+          version = "3.0.5";
           format = "pyproject";
 
           src = ./.;

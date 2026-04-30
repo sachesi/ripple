@@ -7,7 +7,7 @@ CLI tool to manage Proton builds. Downloads releases to a central store and syml
 - Centralized storage for Proton builds.
 - Automatic symlinking for Steam (Native/Flatpak), Bottles (Native/Flatpak), Lutris (Native/Flatpak), and Leyen.
 - CPU instruction set detection (v2, v3, v4) for build compatibility.
-- "latest" and source-specific (e.g. `ge-proton-latest`) symlink aliases.
+- Source-specific symlink aliases such as `ge-proton-latest`.
 
 ## Installation
 
@@ -28,7 +28,7 @@ nix run github:sachesi/ripple
 ```
 
 Install to system (NixOS):
-Add to `environment.systemPackages` or use as a flake input.
+Add `inputs.ripple.packages.${pkgs.system}.default` to `environment.systemPackages`, or expose it through your own flake outputs.
 
 
 ## Usage
@@ -46,5 +46,3 @@ ripple --help
 ### Configuration
 - Config: `~/.config/ripple/config.json`
 - Store: `~/.local/share/ripple/store`
-
-Built with Gemini
