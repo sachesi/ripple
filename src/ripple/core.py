@@ -21,7 +21,6 @@ from .constants import (
     CONFIG_PATH,
     DEFAULT_CENTRAL_BASE,
     HOME,
-    LATEST_LINK_LABEL,
     LOCK_FILENAME,
     MIN_FREE_SPACE_GB,
     SYMLINK_TARGET_LABELS,
@@ -251,6 +250,22 @@ def make_symlink(link_path: Path, target: Path, verbose: bool = True, destinatio
     link_path.symlink_to(target)
 
 
+def remove_symlink_if_present(link_path: Path, *, verbose: bool = True) -> None:
+    if not link_path.is_symlink():
+        return
+    if verbose:
+        info(f"Remove: {link_path.name}")
+    link_path.unlink()
+
+
+def sync_version_link(parent_dir: Path, version_dir: Path, *, keep: bool) -> None:
+    link_path = parent_dir / version_dir.name
+    if keep:
+        make_symlink(link_path, version_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
+    else:
+        remove_symlink_if_present(link_path, verbose=False)
+
+
 def fetch_ge_proton() -> ReleaseInfo:
     for rel in fetch_json("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"):
         for asset in rel.get("assets", []):
@@ -351,9 +366,9 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
     store_dir = central_base / "crate" / release.slug
     central_dir = store_dir / release.tag
     version_file = store_dir / ".latest-version"
+    locked = (central_dir / LOCK_FILENAME).exists()
 
     if central_dir.is_dir():
-        locked = (central_dir / LOCK_FILENAME).exists()
         lock_note = " 🔒 locked" if locked else ""
         if update_latest and version_file.exists() and version_file.read_text().strip() == release.tag:
             ok(f"Already up to date: {DIM}{release.tag}{R}{lock_note}")
@@ -376,13 +391,16 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
 
     if update_latest:
         version_file.write_text(release.tag + "\n")
-        make_symlink(central_base / f"{release.slug}-latest", central_dir, destination_label=LATEST_LINK_LABEL)
+        make_symlink(central_base / f"{release.slug}-latest", central_dir, destination_label="Store latest alias")
     else:
         info("Pinned install - latest pointer unchanged")
 
     for parent_dir in symlink_dirs:
         if parent_dir.is_dir():
-            make_symlink(parent_dir / release.tag, central_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
+            sync_version_link(parent_dir, central_dir, keep=(not update_latest or locked))
+            remove_symlink_if_present(parent_dir / "latest", verbose=update_latest)
+            if update_latest:
+                make_symlink(parent_dir / f"{release.slug}-latest", central_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
 
 
 def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[bool, bool]:
@@ -394,17 +412,26 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
     for slug_dir in crate_dir.iterdir():
         if not slug_dir.is_dir():
             continue
+        latest_tag = (slug_dir / ".latest-version").read_text().strip() if (slug_dir / ".latest-version").exists() else None
         for ver_dir in slug_dir.iterdir():
             if ver_dir.is_dir() and (ver_dir / LOCK_FILENAME).exists():
                 has_locked_versions = True
                 for parent_dir in symlink_dirs:
                     if parent_dir.is_dir():
+                        remove_symlink_if_present(parent_dir / "latest", verbose=False)
                         link_path = parent_dir / ver_dir.name
                         if not link_path.is_symlink() or link_path.resolve() != ver_dir.resolve():
                             if not linked_any:
                                 info("Linking missing locked versions...")
                                 linked_any = True
                             make_symlink(link_path, ver_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
+                        if latest_tag == ver_dir.name:
+                            latest_link = parent_dir / f"{slug_dir.name}-latest"
+                            if not latest_link.is_symlink() or latest_link.resolve() != ver_dir.resolve():
+                                if not linked_any:
+                                    info("Linking missing locked versions...")
+                                    linked_any = True
+                                make_symlink(latest_link, ver_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
     return has_locked_versions, linked_any
 
 

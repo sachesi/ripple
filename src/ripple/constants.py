@@ -37,8 +37,6 @@ SYMLINK_TARGET_LABELS: dict[Path, str] = {
     HOME / ".local/share/leyen/proton": "Leyen",
 }
 
-LATEST_LINK_LABEL = "Store latest alias"
-
 ALL_SOURCES: list[tuple[str, str]] = [
     ("ge-proton", "GE Proton      (GloriousEggroll/proton-ge-custom, GitHub)"),
     ("dw-proton", "DW Proton      (dawn-winery/dwproton, dawn.wine)"),
