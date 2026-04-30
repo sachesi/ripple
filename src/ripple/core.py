@@ -383,6 +383,9 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
     for parent_dir in symlink_dirs:
         if parent_dir.is_dir():
             make_symlink(parent_dir / release.tag, central_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
+            if update_latest:
+                make_symlink(parent_dir / "latest", central_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
+                make_symlink(parent_dir / f"{release.slug}-latest", central_dir, destination_label=SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir)))
 
 
 def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[bool, bool]:
