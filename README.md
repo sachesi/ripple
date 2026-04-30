@@ -20,6 +20,17 @@ To build an RPM:
 make ba-local
 ```
 
+### Nix
+
+Run directly:
+```bash
+nix run github:sachesi/ripple
+```
+
+Install to system (NixOS):
+Add to `environment.systemPackages` or use as a flake input.
+
+
 ## Usage
 
 Run the interactive wizard:
