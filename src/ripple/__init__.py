@@ -1,4 +1,6 @@
 from .cli import main
 
-__version__ = "3.0.8"
+from ._version import __version__
+from .cli import main
+
 __all__ = ["main", "__version__"]

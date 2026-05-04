@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from ._version import __version__
 from .constants import (
     ALL_SOURCES,
     CONFIG_PATH,
