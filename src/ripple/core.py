@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import concurrent.futures
 import json
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .constants import (
     ALL_SOURCES,
     CONFIG_PATH,
@@ -54,7 +54,7 @@ class Config:
         return cls(
             central_base=Path(d["central_base"]),
             enabled_sources=d["enabled_sources"],
-            manage_umu=bool(d.get("manage_umu", False)),
+            manage_umu=d["manage_umu"],
         )
 
 
@@ -136,7 +136,7 @@ def _require_https_url(url: str) -> None:
 
 def fetch_json(url: str) -> Any:
     _require_https_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.3"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"ripple/{__version__}"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
             return json.loads(resp.read())
@@ -170,9 +170,6 @@ def _is_within(base: Path, target: Path) -> bool:
 
 
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
-    if hasattr(tarfile, "fully_trusted_filter"):
-        tf.extractall(path=dest, filter="data")
-        return
     resolved_dest = dest.resolve()
     for member in tf.getmembers():
         member_target = (dest / member.name).resolve()
@@ -183,7 +180,7 @@ def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
 
 def download_file(url: str, dest: Path, label: str) -> None:
     _require_https_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "ripple/3.0.3"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"ripple/{__version__}"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp, open(dest, "wb") as out:  # nosec B310
             total = int(resp.headers.get("Content-Length", 0))
@@ -510,12 +507,6 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
     for sym_dir in symlink_dirs:
         if not sym_dir.is_dir():
             continue
-            
-        # Remove legacy global 'latest' link if it exists
-        legacy_latest = sym_dir / "latest"
-        if legacy_latest.is_symlink():
-            info(f"Removing legacy global 'latest' link in {sym_dir.name}")
-            legacy_latest.unlink()
             
         for link in sym_dir.iterdir():
             if link.is_symlink() and not link.exists():
