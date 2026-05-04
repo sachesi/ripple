@@ -412,25 +412,24 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
         label = SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir))
 
         if update_latest:
-            # Relink previous latest versions as real versions before updating aliases
-            for alias in ["latest", f"{release.slug}-latest"]:
-                alias_path = parent_dir / alias
-                if alias_path.is_symlink():
-                    try:
-                        old_target = alias_path.resolve()
-                        if old_target.exists() and "crate" in old_target.parts:
-                            if old_target != central_dir:
-                                _restore_real_version_file(old_target)
-                            
-                            # Ensure the old target has a versioned link
-                            versioned_link = parent_dir / old_target.name
-                            if not versioned_link.exists():
-                                make_symlink(versioned_link, old_target, destination_label=label)
-                    except Exception:
-                        pass
+            # Relink previous latest version as real version before updating alias
+            alias = f"{release.slug}-latest"
+            alias_path = parent_dir / alias
+            if alias_path.is_symlink():
+                try:
+                    old_target = alias_path.resolve()
+                    if old_target.exists() and "crate" in old_target.parts:
+                        if old_target != central_dir:
+                            _restore_real_version_file(old_target)
+                        
+                        # Ensure the old target has a versioned link
+                        versioned_link = parent_dir / old_target.name
+                        if not versioned_link.exists():
+                            make_symlink(versioned_link, old_target, destination_label=label)
+                except Exception:
+                    pass
 
-            # Update aliases to new version
-            make_symlink(parent_dir / "latest", central_dir, destination_label=label)
+            # Update alias to new version
             make_symlink(parent_dir / f"{release.slug}-latest", central_dir, destination_label=label)
         else:
             # Pinned install: link as real version
@@ -511,6 +510,13 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
     for sym_dir in symlink_dirs:
         if not sym_dir.is_dir():
             continue
+            
+        # Remove legacy global 'latest' link if it exists
+        legacy_latest = sym_dir / "latest"
+        if legacy_latest.is_symlink():
+            info(f"Removing legacy global 'latest' link in {sym_dir.name}")
+            legacy_latest.unlink()
+            
         for link in sym_dir.iterdir():
             if link.is_symlink() and not link.exists():
                 info(f"Removing dangling symlink: {link.name}")
