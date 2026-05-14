@@ -246,33 +246,6 @@ def make_symlink(link_path: Path, target: Path, verbose: bool = True, destinatio
     link_path.parent.mkdir(parents=True, exist_ok=True)
     link_path.symlink_to(target)
 
-def _set_latest_version_file(dir_path: Path, slug: str) -> None:
-    version_file = dir_path / "version"
-    real_version_file = dir_path / ".real_version"
-    
-    # If version exists and we haven't backed it up yet, do so
-    if version_file.exists() and not real_version_file.exists():
-        version_file.rename(real_version_file)
-    
-    # Write the alias name to the version file
-    version_file.write_text(f"{slug}-latest\n")
-
-
-def _restore_real_version_file(dir_path: Path) -> None:
-    version_file = dir_path / "version"
-    real_version_file = dir_path / ".real_version"
-    
-    if real_version_file.exists():
-        if version_file.exists():
-            version_file.unlink()
-        real_version_file.rename(version_file)
-
-
-
-
-
-
-
 
 def fetch_ge_proton() -> ReleaseInfo:
     for rel in fetch_json("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"):
@@ -400,7 +373,6 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
     if update_latest:
         version_file.write_text(release.tag + "\n")
         make_symlink(central_base / f"{release.slug}-latest", central_dir)
-        _set_latest_version_file(central_dir, release.slug)
 
     for parent_dir in symlink_dirs:
         if not parent_dir.is_dir():
@@ -409,23 +381,6 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
         label = SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir))
 
         if update_latest:
-            # Relink previous latest version as real version before updating alias
-            alias = f"{release.slug}-latest"
-            alias_path = parent_dir / alias
-            if alias_path.is_symlink():
-                try:
-                    old_target = alias_path.resolve()
-                    if old_target.exists() and "crate" in old_target.parts:
-                        if old_target != central_dir:
-                            _restore_real_version_file(old_target)
-                        
-                        # Ensure the old target has a versioned link
-                        versioned_link = parent_dir / old_target.name
-                        if not versioned_link.exists():
-                            make_symlink(versioned_link, old_target, destination_label=label)
-                except Exception:
-                    pass
-
             # Update alias to new version
             make_symlink(parent_dir / f"{release.slug}-latest", central_dir, destination_label=label)
         else:
@@ -462,7 +417,6 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
                     
                     # If this locked version is also the latest, ensure the slug-latest alias exists
                     if latest_tag == ver_dir.name:
-                        _set_latest_version_file(ver_dir, slug_dir.name)
                         latest_link = parent_dir / f"{slug_dir.name}-latest"
                         if not latest_link.is_symlink() or latest_link.resolve() != ver_dir.resolve():
                             if not linked_any:
@@ -484,17 +438,27 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
     for slug_dir in crate_dir.iterdir():
         if not slug_dir.is_dir():
             continue
+        
         latest_tag = (slug_dir / ".latest-version").read_text().strip() if (slug_dir / ".latest-version").exists() else None
 
         old_dirs: list[Path] = []
         for item in slug_dir.iterdir():
             if item.is_dir() and not item.name.startswith("."):
-                if item.name == latest_tag:
+                # If we have a latest-version record, keep it
+                if latest_tag and item.name == latest_tag:
                     continue
+                # If locked, keep it
                 if (item / LOCK_FILENAME).exists():
                     info(f"Keeping locked version: {slug_dir.name}/{item.name}")
                     continue
                 old_dirs.append(item)
+
+        # To ensure we don't delete everything if .latest-version is missing,
+        # we always keep at least the newest version by directory name.
+        if not latest_tag and old_dirs:
+            old_dirs.sort()
+            keep = old_dirs.pop()
+            info(f"No latest record for {slug_dir.name}, keeping newest: {keep.name}")
 
         for old_dir in sorted(old_dirs):
             size = sum(f.stat().st_size for f in old_dir.rglob("*") if f.is_file())
@@ -640,7 +604,8 @@ def list_installed(cfg: Config) -> None:
         store_dir = crate_dir / slug
         if not store_dir.is_dir():
             continue
-        latest_tag = (cfg.central_base / f"{slug}-latest").resolve().name if (cfg.central_base / f"{slug}-latest").is_symlink() else None
+        
+        latest_tag = (store_dir / ".latest-version").read_text().strip() if (store_dir / ".latest-version").exists() else None
         versions = sorted([p for p in store_dir.iterdir() if p.is_dir() and not p.name.startswith(".")], reverse=True)
         if not versions:
             continue
@@ -648,11 +613,11 @@ def list_installed(cfg: Config) -> None:
         ui.print(f"{C_TL}│{R}  {CYAN}[{slug}]{R}  {BOLD}{label.split('(')[0].strip()}{R}")
         for v in versions:
             markers = []
-            if v.name == latest_tag:
+            if latest_tag and v.name == latest_tag:
                 markers.append(GREEN + "latest" + R)
             if (v / LOCK_FILENAME).exists():
                 markers.append(YELLOW + "locked" + R)
-            tag_str = f"{C_TL}│{R}    " + (CYAN + v.name + R if v.name == latest_tag else v.name)
+            tag_str = f"{C_TL}│{R}    " + (CYAN + v.name + R if latest_tag and v.name == latest_tag else v.name)
             if markers:
                 tag_str += "  " + DIM + "← " + R + ", ".join(markers)
             ui.print(tag_str)
