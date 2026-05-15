@@ -516,18 +516,54 @@ def fetch_specific_umu_release(tag: str) -> ReleaseInfo:
     raise RuntimeError(f"Release tag '{tag}' not found for umu.")
 
 
+def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
+    total = len(items)
+    if total == 0:
+        return
+
+    idx = 0
+    while True:
+        end = min(idx + per_page, total)
+        for i in range(idx, end):
+            for line in items[i]:
+                ui.print(line)
+
+        if total <= per_page:
+            break
+
+        opts = []
+        if end < total:
+            opts.append(f"{BOLD}n{R}ext")
+        if idx > 0:
+            opts.append(f"{BOLD}p{R}rev")
+        opts.append(f"{BOLD}q{R}uit")
+
+        prompt = f"Showing {idx+1}-{end} of {total}. " + ", ".join(opts)
+        res = ask(prompt).lower()
+
+        if res == "q":
+            break
+        elif res == "n" and end < total:
+            idx += per_page
+        elif res == "p" and idx > 0:
+            idx -= per_page
+
+
 def list_remote_umu_releases() -> None:
     step("Remote Releases for umu")
-    shown = 0
+    items = []
     for rel in fetch_json_paged(UMU_RELEASES_API):
         asset_url = _pick_umu_zipapp_url(rel)
         if not asset_url:
             continue
-        ui.print(f"{C_TL}│{R}  {CYAN}{rel['tag_name']}{R}")
-        ui.print(f"{C_TL}│{R}    {DIM}{Path(asset_url).name}{R}")
-        shown += 1
-    if shown == 0:
+        items.append([
+            f"{C_TL}│{R}  {CYAN}{rel['tag_name']}{R}",
+            f"{C_TL}│{R}    {DIM}{Path(asset_url).name}{R}"
+        ])
+    if not items:
         warn("No matching umu zipapp assets found.")
+        return
+    paginate_interactive(items)
 
 
 def _extract_umu_binary(archive: Path, dest: Path) -> Path:
@@ -634,15 +670,18 @@ def list_remote_releases(slug: str) -> None:
         sys.exit(1)
     if api.cpu_aware:
         info(f"CPU x86-64-v{detect_cpu_level()} - showing best asset per release")
-    shown = 0
+    items = []
     for rel in fetch_json_paged(api.url):
         asset_url = next((a["browser_download_url"] for a in rel.get("assets", []) if api.pick_asset(a["browser_download_url"])), None)
         if asset_url:
-            ui.print(f"{C_TL}│{R}  {CYAN}{rel['tag_name']}{R}")
-            ui.print(f"{C_TL}│{R}    {DIM}{Path(asset_url).name}{R}")
-            shown += 1
-    if shown == 0:
+            items.append([
+                f"{C_TL}│{R}  {CYAN}{rel['tag_name']}{R}",
+                f"{C_TL}│{R}    {DIM}{Path(asset_url).name}{R}"
+            ])
+    if not items:
         warn("No matching assets found.")
+        return
+    paginate_interactive(items)
 
 
 def fetch_specific_release(slug: str, tag: str) -> ReleaseInfo:
