@@ -518,18 +518,18 @@ def fetch_specific_umu_release(tag: str) -> ReleaseInfo:
 
 def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
     total = len(items)
-    if total == 0:
+    if total <= per_page:
+        for item in items:
+            for line in item:
+                ui.print(line)
         return
 
     idx = 0
     while True:
         end = min(idx + per_page, total)
-        for i in range(idx, end):
-            for line in items[i]:
+        for item in items[idx:end]:
+            for line in item:
                 ui.print(line)
-
-        if total <= per_page:
-            break
 
         opts = []
         if end < total:
@@ -539,14 +539,16 @@ def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
         opts.append(f"{BOLD}q{R}uit")
 
         prompt = f"Showing {idx+1}-{end} of {total}. " + ", ".join(opts)
-        res = ask(prompt).lower()
-
-        if res == "q":
-            break
-        elif res == "n" and end < total:
-            idx += per_page
-        elif res == "p" and idx > 0:
-            idx -= per_page
+        while True:
+            res = ask(prompt).lower()
+            if res == "q":
+                return
+            if res == "n" and end < total:
+                idx += per_page
+                break
+            if res == "p" and idx > 0:
+                idx -= per_page
+                break
 
 
 def list_remote_umu_releases() -> None:
