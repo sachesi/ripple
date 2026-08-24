@@ -8,6 +8,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -135,16 +136,70 @@ def _require_https_url(url: str) -> None:
         raise RuntimeError(f"Refusing non-HTTPS URL: {url}")
 
 
-def fetch_json(url: str) -> Any:
+def fetch_json(url: str, *, attempts: int = 3) -> Any:
     _require_https_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": f"ripple/{__version__}"})
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                raise RuntimeError(_rate_limit_message(url, e)) from e
+            if e.code >= 500 and attempt < attempts:
+                last_exc = e
+                time.sleep(min(2 ** (attempt - 1), 4))
+                continue
+            raise RuntimeError(f"Server returned error {e.code} for {url}") from e
+        except urllib.error.URLError as e:
+            if attempt < attempts:
+                last_exc = e
+                time.sleep(min(2 ** (attempt - 1), 4))
+                continue
+            raise RuntimeError(f"Network error after {attempts} attempts for {url}: {e.reason}") from e
+    raise RuntimeError(f"Request failed for {url}: {last_exc}")
+
+
+def _rate_limit_message(url: str, e: urllib.error.HTTPError) -> str:
+    reset = e.headers.get("x-ratelimit-reset")
+    when = ""
+    if reset and reset.isdigit():
+        when = f", resets at {time.strftime('%H:%M %Z', time.localtime(int(reset)))}"
+    return f"GitHub API rate limit exceeded (403){when} for {url}"
+
+
+def _latest_release_with_fallback(
+    url: str,
+    pick_asset: Callable[[str], bool],
+    *,
+    name: str,
+    slug: str,
+    choose: Callable[[list[str]], str] | None = None,
+) -> ReleaseInfo:
+    """Resolve the newest release with a usable asset.
+
+    Tries the cheap /releases/latest endpoint first (single object, one API call,
+    excludes pre-releases); falls back to walking the full /releases list when
+    the latest endpoint is missing (404) or has no matching asset.
+    """
+    def from_rel(rel: dict[str, Any]) -> ReleaseInfo | None:
+        matches = [a["browser_download_url"] for a in rel.get("assets", []) if pick_asset(a["browser_download_url"])]
+        if not matches:
+            return None
+        return ReleaseInfo(name, slug, rel["tag_name"], choose(matches) if choose else matches[0])
+
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
-            raise RuntimeError(f"API Rate Limit exceeded (403) for {url}") from e
-        raise RuntimeError(f"Server returned error {e.code} for {url}") from e
+        info = from_rel(fetch_json(f"{url}/latest"))
+        if info is not None:
+            return info
+    except RuntimeError:
+        pass
+    for rel in fetch_json(url):
+        info = from_rel(rel)
+        if info is not None:
+            return info
+    raise RuntimeError(f"No {name} release with a matching asset found.")
 
 
 def fetch_json_paged(url: str, *, per_page: int = 100) -> list[Any]:
@@ -269,15 +324,16 @@ def _ge_asset_filter(url: str) -> bool:
 
 
 def fetch_ge_proton() -> ReleaseInfo:
-    for rel in fetch_json("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"):
-        for asset in rel.get("assets", []):
-            url = asset["browser_download_url"]
-            if _ge_asset_filter(url):
-                return ReleaseInfo("GE Proton", "ge-proton", rel["tag_name"], url)
-    raise RuntimeError("No GE Proton release with an archive asset found for this architecture.")
+    return _latest_release_with_fallback(
+        "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases",
+        _ge_asset_filter,
+        name="GE Proton",
+        slug="ge-proton",
+    )
 
 
 def fetch_dw_proton() -> ReleaseInfo:
+    # dawn.wine is a Forgejo instance without a /latest shortcut; walk the list.
     for rel in fetch_json("https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases"):
         for asset in rel.get("assets", []):
             url = asset["browser_download_url"]
@@ -288,7 +344,6 @@ def fetch_dw_proton() -> ReleaseInfo:
 
 def fetch_cachyos_proton() -> ReleaseInfo:
     cpu_level = detect_cpu_level()
-    releases = fetch_json("https://api.github.com/repos/CachyOS/proton-cachyos/releases")
     suffixes_by_priority = ["x86_64"]
     if cpu_level >= 2:
         suffixes_by_priority.insert(0, "x86_64_v2")
@@ -297,29 +352,32 @@ def fetch_cachyos_proton() -> ReleaseInfo:
     if cpu_level >= 4:
         suffixes_by_priority.insert(0, "x86_64_v4")
 
-    for rel in releases:
-        suffix_map: dict[str, str] = {}
-        for asset in rel.get("assets", []):
-            url = asset["browser_download_url"]
-            if not url.endswith((".tar.xz", ".tar.gz")):
-                continue
-            for sfx in suffixes_by_priority:
-                if re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", url):
-                    suffix_map[sfx] = url
-                    break
+    def pick(url: str) -> bool:
+        return any(re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", url) for sfx in suffixes_by_priority)
+
+    def choose(matches: list[str]) -> str:
         for sfx in suffixes_by_priority:
-            if sfx in suffix_map:
-                return ReleaseInfo("CachyOS Proton", "cachyos-proton", rel["tag_name"], suffix_map[sfx])
-    raise RuntimeError("No CachyOS Proton release found matching this CPU's architecture level.")
+            for u in matches:
+                if re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", u):
+                    return u
+        return matches[0]
+
+    return _latest_release_with_fallback(
+        "https://api.github.com/repos/CachyOS/proton-cachyos/releases",
+        pick,
+        name="CachyOS Proton",
+        slug="cachyos-proton",
+        choose=choose,
+    )
 
 
 def fetch_em_proton() -> ReleaseInfo:
-    for rel in fetch_json("https://api.github.com/repos/Etaash-mathamsetty/Proton/releases"):
-        for asset in rel.get("assets", []):
-            url = asset["browser_download_url"]
-            if url.endswith((".tar.xz", ".tar.gz")):
-                return ReleaseInfo("EM Proton", "em-proton", rel["tag_name"], url)
-    raise RuntimeError("No EM Proton release with a .tar.xz / .tar.gz asset found.")
+    return _latest_release_with_fallback(
+        "https://api.github.com/repos/Etaash-mathamsetty/Proton/releases",
+        lambda u: u.endswith((".tar.xz", ".tar.gz")),
+        name="EM Proton",
+        slug="em-proton",
+    )
 
 
 FETCHERS: dict[str, Callable[[], ReleaseInfo]] = {
