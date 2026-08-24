@@ -2,6 +2,7 @@
 import concurrent.futures
 import json
 import os
+import platform
 import re
 import shutil
 import sys
@@ -247,13 +248,33 @@ def make_symlink(link_path: Path, target: Path, verbose: bool = True, destinatio
     link_path.symlink_to(target)
 
 
+def _machine_arch() -> str:
+    machine = platform.machine().lower()
+    return {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+
+
+def _ge_asset_filter(url: str) -> bool:
+    """Accept the GE Proton archive matching this machine's architecture.
+
+    Recent releases ship per-arch assets (e.g. GE-Proton11-5-x86_64.tar.gz,
+    GE-Proton11-5-aarch64.tar.gz); older releases shipped a single unsuffixed
+    .tar.gz. Reject archives built for a different architecture.
+    """
+    name = url.rsplit("/", 1)[-1]
+    if not name.endswith((".tar.gz", ".tar.xz")):
+        return False
+    if f"-{_machine_arch()}.tar." in name:
+        return True
+    return not re.search(r"-(aarch64|x86_64|arm64)\.tar\.", name)
+
+
 def fetch_ge_proton() -> ReleaseInfo:
     for rel in fetch_json("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"):
         for asset in rel.get("assets", []):
             url = asset["browser_download_url"]
-            if url.endswith(".tar.gz"):
+            if _ge_asset_filter(url):
                 return ReleaseInfo("GE Proton", "ge-proton", rel["tag_name"], url)
-    raise RuntimeError("No GE Proton release with a .tar.gz asset found.")
+    raise RuntimeError("No GE Proton release with an archive asset found for this architecture.")
 
 
 def fetch_dw_proton() -> ReleaseInfo:
@@ -322,7 +343,7 @@ def _cachyos_asset_filter(url: str) -> bool:
 
 
 RELEASE_APIS: dict[str, SourceAPI] = {
-    "ge-proton": SourceAPI("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases", lambda u: u.endswith(".tar.gz")),
+    "ge-proton": SourceAPI("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases", _ge_asset_filter),
     "dw-proton": SourceAPI("https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases", lambda u: u.endswith((".tar.xz", ".tar.gz"))),
     "cachyos-proton": SourceAPI("https://api.github.com/repos/CachyOS/proton-cachyos/releases", _cachyos_asset_filter, True),
     "em-proton": SourceAPI("https://api.github.com/repos/Etaash-mathamsetty/Proton/releases", lambda u: u.endswith((".tar.xz", ".tar.gz"))),
