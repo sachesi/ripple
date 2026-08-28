@@ -5,7 +5,8 @@ CLI tool to manage Proton builds. Downloads releases to a central store and syml
 ## Features
 
 - Centralized storage for Proton builds.
-- Automatic symlinking for Steam (Native/Flatpak), Bottles (Native/Flatpak), Lutris (Native/Flatpak), and Leyen.
+- Installed-app detection and automatic target-directory creation for Steam, Bottles, Lutris, and Leyen (Native/Flatpak).
+- Narrow read-only store access setup when a Flatpak sandbox cannot follow Ripple's central-store symlinks.
 - CPU instruction set detection (v2, v3, v4) for build compatibility.
 - Source-specific symlink aliases such as `ge-proton-latest`.
 
