@@ -16,11 +16,6 @@ CLI tool to manage Proton builds. Downloads releases to a central store and syml
 pip install .
 ```
 
-To build an RPM:
-```bash
-make ba-local
-```
-
 ### Nix
 
 Run directly:

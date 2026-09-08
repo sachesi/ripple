@@ -21,12 +21,13 @@ from .core import (
     list_remote_releases,
     list_remote_umu_releases,
     load_config,
+    parse_spec,
     remove_old_versions,
     run_wizard,
     toggle_lock,
     yn,
 )
-from .ui import BOLD, R, done_msg, err, info, step, warn
+from .ui import BOLD, R, done_msg, err, info, ok, step, warn
 
 
 def _installed_flatpak_ids() -> set[str]:
@@ -116,8 +117,7 @@ def require_symlink_dirs(central_base: Path) -> list[Path]:
     try:
         return prepare_symlink_dirs(central_base)
     except OSError as exc:
-        err(f"Could not prepare compatibility-tool directories: {exc}")
-        sys.exit(1)
+        raise RuntimeError(f"Could not prepare compatibility-tool directories: {exc}") from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,9 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-
+def _dispatch(args: argparse.Namespace) -> None:
     cfg = load_config()
 
     if args.list_remote:
@@ -142,7 +140,7 @@ def main() -> None:
             list_remote_umu_releases()
         else:
             list_remote_releases(args.list_remote)
-        done_msg("Done.")
+        done_msg("Listed remote releases.")
         return
 
     if cfg is None or args.configure:
@@ -151,40 +149,33 @@ def main() -> None:
     if args.list:
         list_installed(cfg)
         list_managed_umu(cfg)
-        done_msg("Done.")
+        done_msg("Listed installed versions.")
         return
 
     if args.lock:
         toggle_lock(cfg.central_base, args.lock, lock=True)
         link_locked_versions(cfg.central_base, require_symlink_dirs(cfg.central_base))
-        done_msg("Done.")
+        done_msg("Lock applied.")
         return
     if args.unlock:
         toggle_lock(cfg.central_base, args.unlock, lock=False)
-        done_msg("Done.")
+        done_msg("Lock removed.")
         return
 
     if args.remove_old:
         remove_old_versions(cfg, require_symlink_dirs(cfg.central_base))
-        done_msg("Done.")
+        done_msg("Cleanup complete.")
         return
 
     if args.download:
-        if ":" not in args.download:
-            err(f"Expected SLUG:TAG format, got '{args.download}'")
-            sys.exit(1)
-        dl_slug, dl_tag = args.download.split(":", 1)
-        try:
-            if dl_slug == "umu":
-                install_umu_release(fetch_specific_umu_release(dl_tag))
-            else:
-                symlink_dirs = require_symlink_dirs(cfg.central_base)
-                install_release(fetch_specific_release(dl_slug, dl_tag), cfg.central_base, symlink_dirs, update_latest=False)
-                link_locked_versions(cfg.central_base, symlink_dirs)
-        except Exception as exc:
-            err(str(exc))
-            sys.exit(1)
-        done_msg("Done.")
+        dl_slug, dl_tag = parse_spec(args.download)
+        if dl_slug == "umu":
+            install_umu_release(fetch_specific_umu_release(dl_tag))
+        else:
+            symlink_dirs = require_symlink_dirs(cfg.central_base)
+            install_release(fetch_specific_release(dl_slug, dl_tag), cfg.central_base, symlink_dirs, update_latest=False)
+            link_locked_versions(cfg.central_base, symlink_dirs)
+        done_msg("Download complete.")
         return
 
     if not cfg.enabled_sources and not cfg.manage_umu:
@@ -200,8 +191,8 @@ def main() -> None:
         if isinstance(rel, Exception):
             warn(f"Fetch failed: {rel}")
             continue
-        if not rel:
-            warn("No release information found.")
+        if rel is None:
+            warn(f"'{slug}' is not a known source; skipping.")
             continue
         try:
             install_release(rel, cfg.central_base, symlink_dirs)
@@ -213,8 +204,6 @@ def main() -> None:
     if not has_locked_versions:
         info("No locked versions configured.")
     elif not linked_any:
-        from .ui import ok
-
         ok("Already up to date.")
 
     if cfg.manage_umu:
@@ -225,3 +214,12 @@ def main() -> None:
             warn(f"UMU installation failed: {exc}")
 
     done_msg("Update run complete.")
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    try:
+        _dispatch(args)
+    except Exception as exc:
+        err(str(exc))
+        sys.exit(1)

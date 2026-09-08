@@ -12,14 +12,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ._version import __version__
 from .constants import (
-    ALL_SOURCES,
     CONFIG_PATH,
     DEFAULT_CENTRAL_BASE,
     HOME,
@@ -35,7 +34,7 @@ from .constants import (
     UMU_VERSION_FILE,
     detect_cpu_level,
 )
-from .ui import BOLD, C_TL, CYAN, DIM, GREEN, R, YELLOW, DownloadProgressBar, err, info, ok, step, ui, warn
+from .ui import BOLD, C_TL, CYAN, DIM, GREEN, R, YELLOW, DownloadProgressBar, info, ok, step, ui, warn
 
 
 @dataclass
@@ -55,15 +54,21 @@ class Config:
     def from_dict(cls, d: dict[str, Any]) -> "Config":
         return cls(
             central_base=Path(d["central_base"]),
-            enabled_sources=d["enabled_sources"],
-            manage_umu=d["manage_umu"],
+            enabled_sources=list(d.get("enabled_sources", [])),
+            manage_umu=bool(d.get("manage_umu", False)),
         )
 
 
 def load_config() -> Config | None:
     try:
-        return Config.from_dict(json.loads(CONFIG_PATH.read_text()))
-    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        raw = CONFIG_PATH.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        return Config.from_dict(json.loads(raw))
+    except (KeyError, TypeError, ValueError) as exc:
+        warn(f"Config at {CONFIG_PATH} could not be read ({exc}).")
+        warn("Starting the configuration wizard; saving will overwrite that file.")
         return None
 
 
@@ -79,7 +84,7 @@ def ask(prompt: str, default: str = "") -> str:
         value = input(f"{C_TL}│{R}  {prompt}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        sys.exit(0)
+        sys.exit(130)
     return value if value else default
 
 
@@ -102,8 +107,12 @@ def run_wizard(existing: Config | None = None) -> Config:
     central_base = Path(ask("Store path", default_dir)).expanduser().resolve()
 
     ui.print(f"{C_TL}│{R}\n{C_TL}│{R}  Which Proton sources do you want to download?")
-    currently_enabled = set(existing.enabled_sources) if existing else {s for s, _ in ALL_SOURCES}
-    enabled = [slug for slug, label in ALL_SOURCES if yn(f"[{slug}] {label}", default=slug in currently_enabled)]
+    currently_enabled = set(existing.enabled_sources) if existing else set(SOURCES)
+    enabled = [
+        slug
+        for slug, api in SOURCES.items()
+        if yn(f"[{slug}] {api.name:<14} ({api.description})", default=slug in currently_enabled)
+    ]
 
     manage_umu = yn("Manage umu-run zipapp in ~/.local/bin", default=existing.manage_umu if existing else False)
 
@@ -123,11 +132,14 @@ class ReleaseInfo:
     asset_url: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class SourceAPI:
+    name: str
+    description: str
     url: str
     pick_asset: Callable[[str], bool]
-    cpu_aware: bool = False
+    choose: Callable[[list[str]], str] | None = None
+    has_latest_endpoint: bool = True
 
 
 def _require_https_url(url: str) -> None:
@@ -136,13 +148,28 @@ def _require_https_url(url: str) -> None:
         raise RuntimeError(f"Refusing non-HTTPS URL: {url}")
 
 
-def fetch_json(url: str, *, attempts: int = 3) -> Any:
+class _HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects that would downgrade the transport to plain HTTP."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        _require_https_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_HTTPSOnlyRedirectHandler)
+
+
+def _open_url(url: str) -> Any:
     _require_https_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": f"ripple/{__version__}"})
+    return _opener.open(req, timeout=TIMEOUT)  # nosec B310
+
+
+def fetch_json(url: str, *, attempts: int = 3) -> Any:
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:  # nosec B310
+            with _open_url(url) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 403:
@@ -169,52 +196,31 @@ def _rate_limit_message(url: str, e: urllib.error.HTTPError) -> str:
     return f"GitHub API rate limit exceeded (403){when} for {url}"
 
 
-def _latest_release_with_fallback(
-    url: str,
-    pick_asset: Callable[[str], bool],
-    *,
-    name: str,
-    slug: str,
-    choose: Callable[[list[str]], str] | None = None,
-) -> ReleaseInfo:
-    """Resolve the newest release with a usable asset.
+def _release_info(slug: str, api: SourceAPI, rel: dict[str, Any]) -> ReleaseInfo | None:
+    """Build a ReleaseInfo for this machine, or None when the release has no usable asset."""
+    matches = [a["browser_download_url"] for a in rel.get("assets", []) if api.pick_asset(a["browser_download_url"])]
+    if not matches:
+        return None
+    asset_url = api.choose(matches) if api.choose else matches[0]
+    return ReleaseInfo(api.name, slug, rel["tag_name"], asset_url)
 
-    Tries the cheap /releases/latest endpoint first (single object, one API call,
-    excludes pre-releases); falls back to walking the full /releases list when
-    the latest endpoint is missing (404) or has no matching asset.
+
+def iter_releases(url: str, *, per_page: int = 100) -> Iterator[Any]:
+    """Yield releases page by page so callers can stop before paging the whole history.
+
+    GitHub allows 60 unauthenticated requests per hour, and popular sources have
+    hundreds of releases, so callers looking for one tag must not fetch them all.
     """
-    def from_rel(rel: dict[str, Any]) -> ReleaseInfo | None:
-        matches = [a["browser_download_url"] for a in rel.get("assets", []) if pick_asset(a["browser_download_url"])]
-        if not matches:
-            return None
-        return ReleaseInfo(name, slug, rel["tag_name"], choose(matches) if choose else matches[0])
-
-    try:
-        info = from_rel(fetch_json(f"{url}/latest"))
-        if info is not None:
-            return info
-    except RuntimeError:
-        pass
-    for rel in fetch_json(url):
-        info = from_rel(rel)
-        if info is not None:
-            return info
-    raise RuntimeError(f"No {name} release with a matching asset found.")
-
-
-def fetch_json_paged(url: str, *, per_page: int = 100) -> list[Any]:
-    results: list[Any] = []
     page = 1
     sep = "&" if "?" in url else "?"
     while True:
         batch = fetch_json(f"{url}{sep}per_page={per_page}&page={page}")
         if not batch:
-            break
-        results.extend(batch)
+            return
+        yield from batch
         if len(batch) < per_page:
-            break
+            return
         page += 1
-    return results
 
 
 def _is_within(base: Path, target: Path) -> bool:
@@ -226,6 +232,10 @@ def _is_within(base: Path, target: Path) -> bool:
 
 
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
+    # Pin the filter so extraction behaves the same on every supported Python;
+    # 3.12+ picks one itself and the default changed in 3.14.
+    if hasattr(tarfile, "tar_filter"):
+        tf.extraction_filter = tarfile.tar_filter
     resolved_dest = dest.resolve()
     for member in tf.getmembers():
         member_target = (dest / member.name).resolve()
@@ -235,10 +245,8 @@ def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
 
 
 def download_file(url: str, dest: Path, label: str) -> None:
-    _require_https_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": f"ripple/{__version__}"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp, open(dest, "wb") as out:  # nosec B310
+        with _open_url(url) as resp, open(dest, "wb") as out:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             pb = DownloadProgressBar(label)
@@ -248,6 +256,8 @@ def download_file(url: str, dest: Path, label: str) -> None:
                 downloaded += len(data)
                 chunks += 1
                 pb.update(downloaded, total, chunks)
+            if total and downloaded != total:
+                raise RuntimeError(f"Truncated download for {label}: got {downloaded} of {total} bytes.")
             pb.done()
     except Exception:
         dest.unlink(missing_ok=True)
@@ -308,6 +318,13 @@ def _machine_arch() -> str:
     return {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
 
 
+_ARCHIVE_SUFFIX_RE = r"\.(tar\.xz|tar\.gz)$"
+
+
+def _is_archive(url: str) -> bool:
+    return url.endswith((".tar.xz", ".tar.gz"))
+
+
 def _ge_asset_filter(url: str) -> bool:
     """Accept the GE Proton archive matching this machine's architecture.
 
@@ -316,103 +333,95 @@ def _ge_asset_filter(url: str) -> bool:
     .tar.gz. Reject archives built for a different architecture.
     """
     name = url.rsplit("/", 1)[-1]
-    if not name.endswith((".tar.gz", ".tar.xz")):
+    if not _is_archive(name):
         return False
     if f"-{_machine_arch()}.tar." in name:
         return True
     return not re.search(r"-(aarch64|x86_64|arm64)\.tar\.", name)
 
 
-def fetch_ge_proton() -> ReleaseInfo:
-    return _latest_release_with_fallback(
-        "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases",
-        _ge_asset_filter,
-        name="GE Proton",
-        slug="ge-proton",
-    )
-
-
-def fetch_dw_proton() -> ReleaseInfo:
-    # dawn.wine is a Forgejo instance without a /latest shortcut; walk the list.
-    for rel in fetch_json("https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases"):
-        for asset in rel.get("assets", []):
-            url = asset["browser_download_url"]
-            if url.endswith((".tar.xz", ".tar.gz")):
-                return ReleaseInfo("DW Proton", "dw-proton", rel["tag_name"], url)
-    raise RuntimeError("No DW Proton release with a .tar.xz / .tar.gz asset found.")
-
-
-def fetch_cachyos_proton() -> ReleaseInfo:
-    cpu_level = detect_cpu_level()
-    suffixes_by_priority = ["x86_64"]
-    if cpu_level >= 2:
-        suffixes_by_priority.insert(0, "x86_64_v2")
-    if cpu_level >= 3:
-        suffixes_by_priority.insert(0, "x86_64_v3")
-    if cpu_level >= 4:
-        suffixes_by_priority.insert(0, "x86_64_v4")
-
-    def pick(url: str) -> bool:
-        return any(re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", url) for sfx in suffixes_by_priority)
-
-    def choose(matches: list[str]) -> str:
-        for sfx in suffixes_by_priority:
-            for u in matches:
-                if re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", u):
-                    return u
-        return matches[0]
-
-    return _latest_release_with_fallback(
-        "https://api.github.com/repos/CachyOS/proton-cachyos/releases",
-        pick,
-        name="CachyOS Proton",
-        slug="cachyos-proton",
-        choose=choose,
-    )
-
-
-def fetch_em_proton() -> ReleaseInfo:
-    return _latest_release_with_fallback(
-        "https://api.github.com/repos/Etaash-mathamsetty/Proton/releases",
-        lambda u: u.endswith((".tar.xz", ".tar.gz")),
-        name="EM Proton",
-        slug="em-proton",
-    )
-
-
-FETCHERS: dict[str, Callable[[], ReleaseInfo]] = {
-    "ge-proton": fetch_ge_proton,
-    "dw-proton": fetch_dw_proton,
-    "cachyos-proton": fetch_cachyos_proton,
-    "em-proton": fetch_em_proton,
-}
+def _cachyos_suffixes() -> list[str]:
+    """Asset suffixes this CPU can run, best first."""
+    return [f"x86_64_v{level}" for level in range(detect_cpu_level(), 1, -1)] + ["x86_64"]
 
 
 def _cachyos_asset_filter(url: str) -> bool:
-    cpu_level = detect_cpu_level()
-    suffixes = ["x86_64"]
-    if cpu_level >= 2:
-        suffixes.insert(0, "x86_64_v2")
-    if cpu_level >= 3:
-        suffixes.insert(0, "x86_64_v3")
-    if cpu_level >= 4:
-        suffixes.insert(0, "x86_64_v4")
-    return url.endswith((".tar.xz", ".tar.gz")) and any(re.search(rf"-{re.escape(sfx)}\.(tar\.xz|tar\.gz)$", url) for sfx in suffixes)
+    return any(re.search(rf"-{re.escape(sfx)}{_ARCHIVE_SUFFIX_RE}", url) for sfx in _cachyos_suffixes())
 
 
-RELEASE_APIS: dict[str, SourceAPI] = {
-    "ge-proton": SourceAPI("https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases", _ge_asset_filter),
-    "dw-proton": SourceAPI("https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases", lambda u: u.endswith((".tar.xz", ".tar.gz"))),
-    "cachyos-proton": SourceAPI("https://api.github.com/repos/CachyOS/proton-cachyos/releases", _cachyos_asset_filter, True),
-    "em-proton": SourceAPI("https://api.github.com/repos/Etaash-mathamsetty/Proton/releases", lambda u: u.endswith((".tar.xz", ".tar.gz"))),
+def _cachyos_choose(matches: list[str]) -> str:
+    for sfx in _cachyos_suffixes():
+        for url in matches:
+            if re.search(rf"-{re.escape(sfx)}{_ARCHIVE_SUFFIX_RE}", url):
+                return url
+    return matches[0]
+
+
+SOURCES: dict[str, SourceAPI] = {
+    "ge-proton": SourceAPI(
+        name="GE Proton",
+        description="GloriousEggroll/proton-ge-custom, GitHub",
+        url="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases",
+        pick_asset=_ge_asset_filter,
+    ),
+    "dw-proton": SourceAPI(
+        name="DW Proton",
+        description="dawn-winery/dwproton, dawn.wine",
+        url="https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases",
+        pick_asset=_is_archive,
+        # dawn.wine is a Forgejo instance without a /latest shortcut.
+        has_latest_endpoint=False,
+    ),
+    "cachyos-proton": SourceAPI(
+        name="CachyOS Proton",
+        description="CachyOS/proton-cachyos, GitHub — auto-selects the v2/v3/v4 build",
+        url="https://api.github.com/repos/CachyOS/proton-cachyos/releases",
+        pick_asset=_cachyos_asset_filter,
+        choose=_cachyos_choose,
+    ),
+    "em-proton": SourceAPI(
+        name="EM Proton",
+        description="Etaash-mathamsetty/Proton, GitHub",
+        url="https://api.github.com/repos/Etaash-mathamsetty/Proton/releases",
+        pick_asset=_is_archive,
+    ),
 }
+
+
+def source_api(slug: str) -> SourceAPI:
+    try:
+        return SOURCES[slug]
+    except KeyError:
+        raise RuntimeError(f"Unknown slug '{slug}'. Valid slugs: {', '.join(SOURCES)}") from None
+
+
+def fetch_release(slug: str) -> ReleaseInfo:
+    """Resolve the newest release with an asset usable on this machine.
+
+    Tries the cheap /releases/latest endpoint first (single object, one API call,
+    excludes pre-releases); falls back to walking the /releases list when the
+    latest endpoint is missing or has no matching asset.
+    """
+    api = source_api(slug)
+    if api.has_latest_endpoint:
+        try:
+            release = _release_info(slug, api, fetch_json(f"{api.url}/latest"))
+            if release is not None:
+                return release
+        except RuntimeError:
+            pass
+    for rel in fetch_json(api.url):
+        release = _release_info(slug, api, rel)
+        if release is not None:
+            return release
+    raise RuntimeError(f"No {api.name} release with a matching asset found.")
 
 
 def fetch_releases_concurrently(slugs: list[str]) -> dict[str, Any]:
     step("Checking for updates")
     results: dict[str, Any] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(slugs))) as executor:
-        futs = {executor.submit(FETCHERS[s]): s for s in slugs if s in FETCHERS}
+        futs = {executor.submit(fetch_release, s): s for s in slugs if s in SOURCES}
         for fut in concurrent.futures.as_completed(futs):
             slug = futs[fut]
             try:
@@ -420,6 +429,29 @@ def fetch_releases_concurrently(slugs: list[str]) -> dict[str, Any]:
             except Exception as e:
                 results[slug] = e
     return results
+
+
+def _latest_tag(slug_dir: Path) -> str | None:
+    version_file = slug_dir / ".latest-version"
+    return version_file.read_text().strip() if version_file.exists() else None
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _link_target(link: Path) -> Path:
+    target = Path(os.readlink(link))
+    if not target.is_absolute():
+        target = link.parent / target
+    return Path(os.path.normpath(target))
 
 
 def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list[Path], *, update_latest: bool = True) -> None:
@@ -433,7 +465,7 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
         if update_latest and version_file.exists() and version_file.read_text().strip() == release.tag:
             ok(f"Already up to date: {DIM}{release.tag}{R}{lock_note}")
         else:
-            ok(f"Already stored: {DIM}{central_dir.name}{R}{lock_note}")
+            ok(f"Already in the store, relinking: {DIM}{central_dir.name}{R}{lock_note}")
     else:
         _, _, free = shutil.disk_usage(central_base.parent if central_base.parent.exists() else HOME)
         if free < (MIN_FREE_SPACE_GB * 1024**3):
@@ -452,6 +484,9 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
     if update_latest:
         version_file.write_text(release.tag + "\n")
         make_symlink(central_base / f"{release.slug}-latest", central_dir)
+    elif not (central_dir / LOCK_FILENAME).exists():
+        (central_dir / LOCK_FILENAME).touch()
+        info(f"Locked {release.tag} so cleanup keeps it. Unlock with: {BOLD}ripple --unlock {release.slug}:{release.tag}{R}")
 
     for parent_dir in symlink_dirs:
         if not parent_dir.is_dir():
@@ -476,16 +511,16 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
     for slug_dir in crate_dir.iterdir():
         if not slug_dir.is_dir():
             continue
-        latest_tag = (slug_dir / ".latest-version").read_text().strip() if (slug_dir / ".latest-version").exists() else None
+        latest_tag = _latest_tag(slug_dir)
         for ver_dir in slug_dir.iterdir():
             if ver_dir.is_dir() and (ver_dir / LOCK_FILENAME).exists():
                 has_locked_versions = True
                 for parent_dir in symlink_dirs:
                     if not parent_dir.is_dir():
                         continue
-                    
+
                     label = SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir))
-                    
+
                     # Ensure versioned link exists for locked versions
                     link_path = parent_dir / ver_dir.name
                     if not link_path.is_symlink() or link_path.resolve() != ver_dir.resolve():
@@ -493,7 +528,7 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
                             info("Linking missing locked versions...")
                             linked_any = True
                         make_symlink(link_path, ver_dir, destination_label=label)
-                    
+
                     # If this locked version is also the latest, ensure the slug-latest alias exists
                     if latest_tag == ver_dir.name:
                         latest_link = parent_dir / f"{slug_dir.name}-latest"
@@ -517,8 +552,8 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
     for slug_dir in crate_dir.iterdir():
         if not slug_dir.is_dir():
             continue
-        
-        latest_tag = (slug_dir / ".latest-version").read_text().strip() if (slug_dir / ".latest-version").exists() else None
+
+        latest_tag = _latest_tag(slug_dir)
 
         old_dirs: list[Path] = []
         for item in slug_dir.iterdir():
@@ -540,22 +575,28 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
             info(f"No latest record for {slug_dir.name}, keeping newest: {keep.name}")
 
         for old_dir in sorted(old_dirs):
-            size = sum(f.stat().st_size for f in old_dir.rglob("*") if f.is_file())
+            size = _dir_size(old_dir)
             total_freed += size
             info(f"Removing {slug_dir.name}/{old_dir.name} {DIM}({size / 1_048_576:.0f} MiB){R}")
             shutil.rmtree(old_dir, ignore_errors=True)
             removed_count += 1
 
+    # Compare against both spellings: the link records the path as it was written,
+    # which differs from the resolved one when the store sits under a symlink.
+    store_roots = {cfg.central_base, cfg.central_base.resolve()}
     dangling_count = 0
     for sym_dir in symlink_dirs:
         if not sym_dir.is_dir():
             continue
-            
+
         for link in sym_dir.iterdir():
-            if link.is_symlink() and not link.exists():
-                info(f"Removing dangling symlink: {link.name}")
-                link.unlink()
-                dangling_count += 1
+            if not link.is_symlink() or link.exists():
+                continue
+            if not any(_is_within(root, _link_target(link)) for root in store_roots):
+                continue
+            info(f"Removing dangling symlink: {link.name}")
+            link.unlink()
+            dangling_count += 1
 
     if removed_count == 0 and dangling_count == 0:
         ok("No old versions or dangling symlinks to remove.")
@@ -585,7 +626,7 @@ def fetch_umu_release() -> ReleaseInfo:
 
 
 def fetch_specific_umu_release(tag: str) -> ReleaseInfo:
-    for rel in fetch_json_paged(UMU_RELEASES_API):
+    for rel in iter_releases(UMU_RELEASES_API):
         if rel["tag_name"] != tag:
             continue
         asset_url = _pick_umu_zipapp_url(rel)
@@ -611,11 +652,15 @@ def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
                 ui.print(line)
 
         opts = []
+        keys = []
         if end < total:
             opts.append(f"{BOLD}n{R}ext")
+            keys.append("n")
         if idx > 0:
             opts.append(f"{BOLD}p{R}rev")
+            keys.append("p")
         opts.append(f"{BOLD}q{R}uit")
+        keys.append("q")
 
         prompt = f"Showing {idx+1}-{end} of {total}. " + ", ".join(opts)
         while True:
@@ -628,12 +673,13 @@ def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
             if res == "p" and idx > 0:
                 idx -= per_page
                 break
+            warn(f"Enter one of: {', '.join(keys)}.")
 
 
 def list_remote_umu_releases() -> None:
     step("Remote Releases for umu")
     items = []
-    for rel in fetch_json_paged(UMU_RELEASES_API):
+    for rel in iter_releases(UMU_RELEASES_API):
         asset_url = _pick_umu_zipapp_url(rel)
         if not asset_url:
             continue
@@ -717,17 +763,17 @@ def list_installed(cfg: Config) -> None:
     step("Installed Versions")
     crate_dir = cfg.central_base / "crate"
     any_found = False
-    for slug, label in ALL_SOURCES:
+    for slug, api in SOURCES.items():
         store_dir = crate_dir / slug
         if not store_dir.is_dir():
             continue
-        
-        latest_tag = (store_dir / ".latest-version").read_text().strip() if (store_dir / ".latest-version").exists() else None
+
+        latest_tag = _latest_tag(store_dir)
         versions = sorted([p for p in store_dir.iterdir() if p.is_dir() and not p.name.startswith(".")], reverse=True)
         if not versions:
             continue
         any_found = True
-        ui.print(f"{C_TL}│{R}  {CYAN}[{slug}]{R}  {BOLD}{label.split('(')[0].strip()}{R}")
+        ui.print(f"{C_TL}│{R}  {CYAN}[{slug}]{R}  {BOLD}{api.name}{R}")
         for v in versions:
             markers = []
             if latest_tag and v.name == latest_tag:
@@ -745,19 +791,16 @@ def list_installed(cfg: Config) -> None:
 
 def list_remote_releases(slug: str) -> None:
     step(f"Remote Releases for {slug}")
-    api = RELEASE_APIS.get(slug)
-    if api is None:
-        err(f"Unknown slug '{slug}'. Valid slugs: {', '.join(RELEASE_APIS)}")
-        sys.exit(1)
-    if api.cpu_aware:
+    api = source_api(slug)
+    if api.choose is not None:
         info(f"CPU x86-64-v{detect_cpu_level()} - showing best asset per release")
     items = []
-    for rel in fetch_json_paged(api.url):
-        asset_url = next((a["browser_download_url"] for a in rel.get("assets", []) if api.pick_asset(a["browser_download_url"])), None)
-        if asset_url:
+    for rel in iter_releases(api.url):
+        release = _release_info(slug, api, rel)
+        if release is not None:
             items.append([
-                f"{C_TL}│{R}  {CYAN}{rel['tag_name']}{R}",
-                f"{C_TL}│{R}    {DIM}{Path(asset_url).name}{R}"
+                f"{C_TL}│{R}  {CYAN}{release.tag}{R}",
+                f"{C_TL}│{R}    {DIM}{Path(release.asset_url).name}{R}"
             ])
     if not items:
         warn("No matching assets found.")
@@ -767,31 +810,31 @@ def list_remote_releases(slug: str) -> None:
 
 def fetch_specific_release(slug: str, tag: str) -> ReleaseInfo:
     step(f"Fetching specific release: {slug} {tag}")
-    api = RELEASE_APIS.get(slug)
-    if api is None:
-        raise RuntimeError(f"Unknown slug '{slug}'. Valid slugs: {', '.join(RELEASE_APIS)}")
-    name = {s: lbl.split("(")[0].strip() for s, lbl in ALL_SOURCES}.get(slug, slug)
-    for rel in fetch_json_paged(api.url):
+    api = source_api(slug)
+    for rel in iter_releases(api.url):
         if rel["tag_name"] != tag:
             continue
-        asset_url = next((a["browser_download_url"] for a in rel.get("assets", []) if api.pick_asset(a["browser_download_url"])), None)
-        if asset_url:
-            info(f"Found {CYAN}{tag}{R}")
-            return ReleaseInfo(name=name, slug=slug, tag=tag, asset_url=asset_url)
-        raise RuntimeError(f"Release '{tag}' found but no matching asset for this CPU.")
+        release = _release_info(slug, api, rel)
+        if release is None:
+            raise RuntimeError(f"Release '{tag}' found but no matching asset for this CPU.")
+        info(f"Found {CYAN}{tag}{R}")
+        return release
     raise RuntimeError(f"Release tag '{tag}' not found for slug '{slug}'.")
+
+
+def parse_spec(spec: str) -> tuple[str, str]:
+    slug, sep, tag = spec.partition(":")
+    if not sep or not slug or not tag:
+        raise RuntimeError(f"Expected SLUG:TAG format, got '{spec}'")
+    return slug, tag
 
 
 def toggle_lock(central_base: Path, spec: str, *, lock: bool) -> None:
     step(f"{'Locking' if lock else 'Unlocking'} Version")
-    if ":" not in spec:
-        err(f"Expected SLUG:TAG format, got '{spec}'")
-        sys.exit(1)
-    slug, tag = spec.split(":", 1)
+    slug, tag = parse_spec(spec)
     version_dir = central_base / "crate" / slug / tag
     if not version_dir.is_dir():
-        err(f"Version directory not found: {version_dir}")
-        sys.exit(1)
+        raise RuntimeError(f"Version directory not found: {version_dir}")
     lock_file = version_dir / LOCK_FILENAME
     if lock:
         lock_file.touch()

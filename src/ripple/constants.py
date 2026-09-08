@@ -1,4 +1,5 @@
 
+import functools
 import os
 from pathlib import Path
 
@@ -50,21 +51,12 @@ SYMLINK_TARGET_LABELS: dict[Path, str] = {
     XDG_DATA_HOME / "leyen/proton": "Leyen Native",
 }
 
-ALL_SOURCES: list[tuple[str, str]] = [
-    ("ge-proton", "GE Proton      (GloriousEggroll/proton-ge-custom, GitHub)"),
-    ("dw-proton", "DW Proton      (dawn-winery/dwproton, dawn.wine)"),
-    (
-        "cachyos-proton",
-        "CachyOS Proton (CachyOS/proton-cachyos, GitHub) — auto-selects v2/v3/v4 build",
-    ),
-    ("em-proton", "EM Proton      (Etaash-mathamsetty/Proton, GitHub)"),
-]
-
 _V2_FLAGS = {"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"}
 _V3_FLAGS = {"avx", "avx2", "bmi1", "bmi2", "fma", "movbe", "xsave"}
 _V4_FLAGS = {"avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"}
 
 
+@functools.cache
 def detect_cpu_level() -> int:
     try:
         cpuinfo = Path("/proc/cpuinfo").read_text()
