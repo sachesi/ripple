@@ -121,6 +121,62 @@ def done_msg(msg: str) -> None:
     ui.print(f"{C_TL}│{R}\n{C_TL}╰─{R} {GREEN}✔{R} {BOLD}{msg}{R}\n")
 
 
+def ask(prompt: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{C_TL}│{R}  {prompt}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(130)
+    return value if value else default
+
+def yn(prompt: str, default: bool = True) -> bool:
+    hint = "Y/n" if default else "y/N"
+    raw = ask(f"{prompt} ({hint})")
+    if not raw:
+        return default
+    return raw.lower().startswith("y")
+
+def paginate_interactive(items: list[list[str]], per_page: int = 10) -> None:
+    total = len(items)
+    if total <= per_page:
+        for item in items:
+            for line in item:
+                ui.print(line)
+        return
+
+    idx = 0
+    while True:
+        end = min(idx + per_page, total)
+        for item in items[idx:end]:
+            for line in item:
+                ui.print(line)
+
+        opts = []
+        keys = []
+        if end < total:
+            opts.append(f"{BOLD}n{R}ext")
+            keys.append("n")
+        if idx > 0:
+            opts.append(f"{BOLD}p{R}rev")
+            keys.append("p")
+        opts.append(f"{BOLD}q{R}uit")
+        keys.append("q")
+
+        prompt = f"Showing {idx+1}-{end} of {total}. " + ", ".join(opts)
+        while True:
+            res = ask(prompt).lower()
+            if res == "q":
+                return
+            if res == "n" and end < total:
+                idx += per_page
+                break
+            if res == "p" and idx > 0:
+                idx -= per_page
+                break
+            warn(f"Enter one of: {', '.join(keys)}.")
+
+
 class DownloadProgressBar:
     BLOCKS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
 

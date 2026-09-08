@@ -7,27 +7,25 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .config import load_config, run_wizard
 from .constants import FLATPAK_TARGET_DIRS, NATIVE_TARGET_DIRS, SYMLINK_TARGET_LABELS
-from .core import (
-    fetch_releases_concurrently,
-    fetch_specific_release,
-    fetch_specific_umu_release,
-    fetch_umu_release,
+from .sources import fetch_releases_concurrently, fetch_specific_release, list_remote_releases
+from .store import (
     install_release,
-    install_umu_release,
     link_locked_versions,
     list_installed,
-    list_managed_umu,
-    list_remote_releases,
-    list_remote_umu_releases,
-    load_config,
     parse_spec,
     remove_old_versions,
-    run_wizard,
     toggle_lock,
-    yn,
 )
-from .ui import BOLD, R, done_msg, err, info, ok, step, warn
+from .umu import (
+    fetch_specific_umu_release,
+    fetch_umu_release,
+    install_umu_release,
+    list_managed_umu,
+    list_remote_umu_releases,
+)
+from .ui import BOLD, R, done_msg, err, info, ok, step, warn, yn
 
 
 def _installed_flatpak_ids() -> set[str]:
