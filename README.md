@@ -1,44 +1,45 @@
-# ripple
+# Ripple
 
-CLI tool to manage Proton builds. Downloads releases to a central store and symlinks them into compatibility tool paths for Steam, Bottles, Lutris, and Leyen.
+Ripple downloads Proton builds and keeps one copy of each in a central store, then links
+them into the compatibility tool folders of Steam, Bottles, Lutris and Leyen, native or
+Flatpak. A build that three launchers use takes the disk space of one.
 
-## Features
+It follows GE Proton, DW Proton, CachyOS Proton and EM Proton, and can keep `umu-run` up
+to date in `~/.local/bin`. For CachyOS Proton it picks the x86-64-v2, v3 or v4 build your
+CPU runs best.
 
-- Centralized storage for Proton builds.
-- Installed-app detection and automatic target-directory creation for Steam, Bottles, Lutris, and Leyen (Native/Flatpak).
-- Narrow read-only store access setup when a Flatpak sandbox cannot follow Ripple's central-store symlinks.
-- CPU instruction set detection (v2, v3, v4) for build compatibility.
-- Source-specific symlink aliases such as `ge-proton-latest`.
+## Installing
 
-## Installation
+    pip install .
 
-```bash
-pip install .
-```
+or with Nix:
 
-### Nix
+    nix run github:sachesi/ripple
 
-Run directly:
-```bash
-nix run github:sachesi/ripple
-```
+On NixOS, add `inputs.ripple.packages.${pkgs.system}.default` to
+`environment.systemPackages`. Python 3.10 or later, no dependencies outside the standard
+library. Shell completions for bash, zsh and fish are installed with the package.
 
-Install to system (NixOS):
-Add `inputs.ripple.packages.${pkgs.system}.default` to `environment.systemPackages`, or expose it through your own flake outputs.
+## Using it
 
+The first run asks where the store goes, which sources to follow and whether to manage
+`umu-run`, then installs the newest build of each. Every run after that updates them:
 
-## Usage
+    ripple
 
-Run the interactive wizard:
-```bash
-ripple
-```
+Each launcher sees `<source>-latest`, for example `ge-proton-latest`, which moves to the
+new build on update, so a game set to it never needs touching. A build you want to keep
+is locked and linked under its own name:
 
-For specific actions:
-```bash
-ripple --help
-```
+    ripple --download ge-proton:GE-Proton10-20
+    ripple --remove-old        # everything but the latest and the locked ones
 
-### Configuration
-- Config: `~/.config/ripple/config.json`
-- Store: `~/.local/share/ripple/store`
+Only launchers that are installed get links. A Flatpak launcher that cannot see the
+store is offered read-only access to it through `flatpak override --user`; nothing is
+granted without asking.
+
+The options, the paths and what happens to links are in [docs/usage.md](docs/usage.md).
+Changes go through [CONTRIBUTING.md](CONTRIBUTING.md), and vulnerabilities are reported
+as described in [SECURITY.md](SECURITY.md).
+
+GPL-3.0-or-later.
