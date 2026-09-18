@@ -1,5 +1,5 @@
 {
-  description = "Ripple: CLI tool to manage Proton builds";
+  description = "Keeps Proton builds in one store and links them into Steam, Bottles, Lutris and Leyen";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -15,7 +15,7 @@
       {
         packages.ripple = python.pkgs.buildPythonApplication {
           pname = "ripple";
-          version = "3.1.0";
+          version = "3.2.0";
           format = "pyproject";
 
           src = ./.;
@@ -23,10 +23,6 @@
           nativeBuildInputs = with python.pkgs; [
             setuptools
             wheel
-          ];
-
-          propagatedBuildInputs = with python.pkgs; [
-            # Add runtime dependencies here if any are added to pyproject.toml later
           ];
 
           meta = with pkgs.lib; {
