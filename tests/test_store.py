@@ -62,6 +62,11 @@ class SpecParsingTests(unittest.TestCase):
             with self.subTest(spec=spec), self.assertRaises(RuntimeError):
                 store.parse_spec(spec)
 
+    def test_rejects_tags_that_are_not_a_single_folder_name(self):
+        for spec in ("ge-proton:..", "ge-proton:.", "ge-proton:../../x", "ge-proton:/tmp", "ge-proton:a/b"):
+            with self.subTest(spec=spec), self.assertRaises(RuntimeError):
+                store.parse_spec(spec)
+
 
 class ExtractionTests(unittest.TestCase):
     def _tar_with_member(self, name):
@@ -288,6 +293,23 @@ class PinnedInstallTests(QuietTestCase):
             cfg = config.Config(central_base=store_path, enabled_sources=["ge-proton"])
             store.remove_old_versions(cfg, [])
             self.assertTrue(version_dir.is_dir())
+
+    def test_release_tag_is_not_used_as_a_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            release = sources.ReleaseInfo("GE Proton", "ge-proton", "../escaped", "https://example.invalid/p.tar.gz")
+            with patch.object(store, "download_file") as download, self.assertRaises(RuntimeError):
+                store.install_release(release, Path(tmp), [])
+            download.assert_not_called()
+            self.assertFalse((Path(tmp) / "crate" / "escaped").exists())
+
+    def test_lock_refuses_an_unknown_slug(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (Path(tmp) / "store" / "crate").mkdir(parents=True)
+            with self.assertRaises(RuntimeError):
+                store.toggle_lock(Path(tmp) / "store", "../..:outside", lock=True)
+            self.assertFalse((outside / LOCK_FILENAME).exists())
 
 
 class DownloadTests(QuietTestCase):

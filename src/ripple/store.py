@@ -9,7 +9,7 @@ from .archive import extract_archive, is_within
 from .config import Config
 from .constants import HOME, LOCK_FILENAME, MIN_FREE_SPACE_GB, SYMLINK_TARGET_LABELS
 from .http import download_file
-from .sources import SOURCES, ReleaseInfo
+from .sources import SOURCES, ReleaseInfo, source_api
 from .ui import BOLD, C_TL, CYAN, DIM, GREEN, R, YELLOW, info, ok, step, ui, warn, yn
 
 
@@ -72,6 +72,7 @@ def _link_target(link: Path) -> Path:
 
 
 def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list[Path], *, update_latest: bool = True) -> None:
+    _check_tag(release.tag)
     store_dir = central_base / "crate" / release.slug
     central_dir = store_dir / release.tag
     version_file = store_dir / ".latest-version"
@@ -251,16 +252,24 @@ def list_installed(cfg: Config) -> None:
         warn("No versions installed yet.")
 
 
+def _check_tag(tag: str) -> None:
+    # A tag names a folder in the store and a link beside each launcher's builds.
+    if tag in (".", "..") or "/" in tag or "\0" in tag:
+        raise RuntimeError(f"'{tag}' cannot be used as a version name")
+
+
 def parse_spec(spec: str) -> tuple[str, str]:
     slug, sep, tag = spec.partition(":")
     if not sep or not slug or not tag:
         raise RuntimeError(f"Expected SLUG:TAG format, got '{spec}'")
+    _check_tag(tag)
     return slug, tag
 
 
 def toggle_lock(central_base: Path, spec: str, *, lock: bool) -> None:
     step(f"{'Locking' if lock else 'Unlocking'} Version")
     slug, tag = parse_spec(spec)
+    source_api(slug)
     version_dir = central_base / "crate" / slug / tag
     if not version_dir.is_dir():
         raise RuntimeError(f"Version directory not found: {version_dir}")
