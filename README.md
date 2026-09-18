@@ -20,6 +20,9 @@ On NixOS, add `inputs.ripple.packages.${pkgs.system}.default` to
 `environment.systemPackages`. Python 3.10 or later, no dependencies outside the standard
 library. Shell completions for bash, zsh and fish are installed with the package.
 
+Arch Linux: the AUR package `ripple-proton`, built from
+[packaging/aur/PKGBUILD](packaging/aur/PKGBUILD), which each release tag updates.
+
 ## Using it
 
 The first run asks where the store goes, which sources to follow and whether to manage
