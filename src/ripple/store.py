@@ -112,10 +112,8 @@ def install_release(release: ReleaseInfo, central_base: Path, symlink_dirs: list
         label = SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir))
 
         if update_latest:
-            # Update alias to new version
             make_symlink(parent_dir / f"{release.slug}-latest", central_dir, destination_label=label)
         else:
-            # Pinned install: link as real version
             make_symlink(parent_dir / release.tag, central_dir, destination_label=label)
 
 
@@ -138,7 +136,6 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
 
                     label = SYMLINK_TARGET_LABELS.get(parent_dir, str(parent_dir))
 
-                    # Ensure versioned link exists for locked versions
                     link_path = parent_dir / ver_dir.name
                     if not link_path.is_symlink() or link_path.resolve() != ver_dir.resolve():
                         if not linked_any:
@@ -146,7 +143,7 @@ def link_locked_versions(central_base: Path, symlink_dirs: list[Path]) -> tuple[
                             linked_any = True
                         make_symlink(link_path, ver_dir, destination_label=label)
 
-                    # If this locked version is also the latest, ensure the slug-latest alias exists
+                    # A locked version can also be the latest one; it then needs the alias too.
                     if latest_tag == ver_dir.name:
                         latest_link = parent_dir / f"{slug_dir.name}-latest"
                         if not latest_link.is_symlink() or latest_link.resolve() != ver_dir.resolve():
@@ -175,17 +172,15 @@ def remove_old_versions(cfg: Config, symlink_dirs: list[Path]) -> None:
         old_dirs: list[Path] = []
         for item in slug_dir.iterdir():
             if item.is_dir() and not item.name.startswith("."):
-                # If we have a latest-version record, keep it
                 if latest_tag and item.name == latest_tag:
                     continue
-                # If locked, keep it
                 if (item / LOCK_FILENAME).exists():
                     info(f"Keeping locked version: {slug_dir.name}/{item.name}")
                     continue
                 old_dirs.append(item)
 
-        # To ensure we don't delete everything if .latest-version is missing,
-        # we always keep at least the newest version by directory name.
+        # Without a .latest-version record nothing marks the current build, so keep
+        # the newest by name rather than emptying the source.
         if not latest_tag and old_dirs:
             old_dirs.sort()
             keep = old_dirs.pop()
