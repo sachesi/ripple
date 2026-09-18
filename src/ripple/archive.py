@@ -14,15 +14,24 @@ def is_within(base: Path, target: Path) -> bool:
 
 
 def safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
-    # Pin the filter so extraction behaves the same on every supported Python;
-    # 3.12+ picks one itself and the default changed in 3.14.
-    if hasattr(tarfile, "tar_filter"):
-        tf.extraction_filter = tarfile.tar_filter
+    # The "data" filter is the only one that also checks where links point. 3.14
+    # uses it by default, older releases need it set, and Pythons without filters
+    # rely on the checks below alone.
+    if hasattr(tarfile, "data_filter"):
+        tf.extraction_filter = tarfile.data_filter
     resolved_dest = dest.resolve()
     for member in tf.getmembers():
         member_target = (dest / member.name).resolve()
         if not is_within(resolved_dest, member_target):
             raise RuntimeError(f"Unsafe archive member path: {member.name}")
+        if member.issym() or member.islnk():
+            # A symlink points relative to its own folder, a hardlink to the archive
+            # root; an absolute linkname replaces the base and fails the check.
+            base = (dest / member.name).parent.resolve() if member.issym() else resolved_dest
+            if not is_within(resolved_dest, (base / member.linkname).resolve()):
+                raise RuntimeError(f"Unsafe archive link: {member.name} -> {member.linkname}")
+        elif not (member.isfile() or member.isdir()):
+            raise RuntimeError(f"Unsupported archive member type: {member.name}")
         tf.extract(member, path=dest)
 
 

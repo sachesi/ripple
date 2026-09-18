@@ -92,6 +92,78 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual((dest / "proton" / "file").read_bytes(), b"payload")
 
 
+class LinkExtractionTests(unittest.TestCase):
+    """Links must stay inside the destination, with Python's filter and without it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.dest = self.root / "dest"
+        self.dest.mkdir()
+        self.outside = self.root / "outside"
+        self.outside.write_text("original")
+
+    def _for_each_mode(self, members, check):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for name, kind, link in members:
+                member = tarfile.TarInfo(name)
+                member.type = kind
+                member.linkname = link
+                payload = b"overwritten" if kind == tarfile.REGTYPE else b""
+                member.size = len(payload)
+                tf.addfile(member, io.BytesIO(payload))
+        for with_filter in (True, False):
+            dest = self.dest / str(with_filter)
+            dest.mkdir()
+            buf.seek(0)
+            # Swapping in the permissive filter leaves only Ripple's own checks.
+            permissive = patch.object(archive.tarfile, "data_filter", tarfile.fully_trusted_filter)
+            with self.subTest(with_filter=with_filter), tarfile.open(fileobj=buf, mode="r") as tf:
+                if with_filter:
+                    check(dest, lambda: archive.safe_extract(tf, dest))
+                else:
+                    with permissive:
+                        check(dest, lambda: archive.safe_extract(tf, dest))
+
+    def _assert_rejected(self, *members):
+        def check(dest, extract):
+            with self.assertRaises((RuntimeError, tarfile.TarError)):
+                extract()
+
+        self._for_each_mode(members, check)
+        self.assertEqual(self.outside.read_text(), "original")
+
+    def test_hardlink_out_of_the_destination_is_rejected(self):
+        self._assert_rejected(
+            ("p/h", tarfile.LNKTYPE, str(self.outside)),
+            ("p/h", tarfile.REGTYPE, ""),
+        )
+
+    def test_absolute_symlink_is_rejected(self):
+        self._assert_rejected(("p/s", tarfile.SYMTYPE, str(self.outside)))
+
+    def test_relative_symlink_climbing_out_is_rejected(self):
+        self._assert_rejected(("p/s", tarfile.SYMTYPE, "../../../outside"))
+
+    def test_links_within_the_tree_extract(self):
+        def check(dest, extract):
+            extract()
+            self.assertEqual((dest / "p/bin/up").read_bytes(), b"overwritten")
+            self.assertEqual((dest / "p/lib/hard").read_bytes(), b"overwritten")
+
+        self._for_each_mode(
+            [
+                ("p/lib/file", tarfile.REGTYPE, ""),
+                ("p/lib/sym", tarfile.SYMTYPE, "file"),
+                ("p/bin/up", tarfile.SYMTYPE, "../lib/file"),
+                ("p/lib/hard", tarfile.LNKTYPE, "p/lib/file"),
+            ],
+            check,
+        )
+
+
 class CachyosAssetTests(unittest.TestCase):
     def test_suffixes_are_ordered_best_first(self):
         with patch.object(sources, "detect_cpu_level", return_value=3):
