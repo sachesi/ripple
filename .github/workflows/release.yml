@@ -1,0 +1,60 @@
+name: Release
+
+# A release tag gets a GitHub release, once CI has passed (ci.yml calls this). The tag
+# must agree with the version in the sources; its notes list the fixes and features
+# committed since the previous tag.
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The notes need the history back to the previous tag.
+          fetch-depth: 0
+      - name: Check the version and write the notes
+        run: |
+          python3 - <<'EOF'
+          import os, re, subprocess, sys
+
+          def grep(path, pattern):
+              with open(path) as f:
+                  return path, re.search(pattern, f.read()).group(1)
+
+          tag = os.environ["TAG"].removeprefix("v")
+          found = [
+              grep("src/ripple/_version.py", r"__version__ = \"(.*)\""),
+          ]
+          wrong = [f"{where} says {v}" for where, v in found if v != tag]
+          if wrong:
+              sys.exit(f"The tag is {tag}, but " + ", ".join(wrong))
+
+          def git(*args):
+              return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
+
+          previous = git("describe", "--tags", "--abbrev=0", os.environ["TAG"] + "^")
+          span = f"{previous}..{os.environ['TAG']}" if previous else os.environ["TAG"]
+          subjects = git("log", "--no-merges", "--format=%s", span).splitlines()
+          picked = [s for s in subjects if re.match(r"(feat|fix|perf)(\(.*\))?!?:", s)] or [
+              s for s in subjects if not re.match(r"(chore|ci)(\(.*\))?!?:", s)
+          ]
+          notes = ["\n".join(f"- {s}" for s in picked)]
+          with open(os.environ["RUNNER_TEMP"] + "/notes.md", "w") as f:
+              f.write("\n\n".join(notes) + "\n")
+          EOF
+      - name: Publish
+        run: |
+          # A release that already exists keeps its notes, which may have been edited by hand.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "Ripple ${TAG#v}" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi

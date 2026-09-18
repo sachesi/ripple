@@ -22,8 +22,8 @@ jobs:
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python }}
       - name: Install
@@ -33,10 +33,18 @@ jobs:
       - name: Run
         run: ripple --help
 
-  aur:
-    name: AUR
+  release:
+    name: Release
     needs: [test]
     if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+
+  aur:
+    name: AUR
+    # After the release, whose job also checks that the tag matches the sources.
+    needs: release
     uses: ./.github/workflows/aur.yml
     # A called workflow sees no secrets, its environment's included, unless the
     # caller passes them on.
