@@ -2,6 +2,7 @@
 %define debug_package %{nil}
 
 Name:           ripple
+# The release workflow and Copr set Version to the tag they build.
 Version:        3.2.0
 Release:        1%{?dist}
 Summary:        Download and install Proton releases with centralized storage
